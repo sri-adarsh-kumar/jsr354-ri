@@ -23,11 +23,10 @@ import javax.money.Monetary;
 import javax.money.format.AmountFormatContext;
 import javax.money.format.MonetaryParseException;
 import java.io.IOException;
-import java.util.Currency;
-import java.util.Locale;
-import java.util.Objects;
-import java.util.ResourceBundle;
+import java.text.DecimalFormatSymbols;
+import java.util.*;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
 import static java.util.logging.Level.FINEST;
@@ -36,6 +35,14 @@ import static org.javamoney.moneta.format.CurrencyStyle.CODE;
 /**
  * Implements a {@link FormatToken} that adds a localizable {@link String}, read
  * by key from a {@link ResourceBundle}.
+ * <p>
+ * Symbol parsing uses locale-aware resolution with the following precedence:
+ * <ol>
+ * <li>If an explicit currency is in the context, validate that the symbol matches.</li>
+ * <li>Check if the symbol matches the locale's default currency.</li>
+ * <li>Scan all available JDK currencies for matching symbols.</li>
+ * <li>If exactly one match is found, use it; if multiple, raise ambiguity error; if none, raise unknown symbol error.</li>
+ * </ol>
  *
  * @author Anatole Tresch
  */
@@ -206,29 +213,10 @@ final class CurrencyToken implements FormatToken {
                     }
                     break;
                 case SYMBOL:
-                    if (token.startsWith("$")) {
-                        throw new MonetaryParseException("$ is not a unique currency symbol.", token,
-                                context.getErrorIndex());
-                    } else if (token.startsWith("€")) {
-                        cur = Monetary.getCurrency("EUR", providers);
-                        context.consume('€');
-                    } else if (token.startsWith("£")) {
-                        cur = Monetary.getCurrency("GBP", providers);
-                        context.consume('£');
-                    } else {
-                        //System.out.println(token);
-                        // Workaround for https://github.com/JavaMoney/jsr354-ri/issues/274
-                        String code = token;
-                        for (Currency juc : Currency.getAvailableCurrencies()) {
-                            if (token.equals(juc.getSymbol())) {
-                                //System.out.println(juc);
-                                code = juc.getCurrencyCode();
-                                break;
-                            }
-                        }
-                        cur = Monetary.getCurrency(code, providers);
-                        context.consume(token);
-                    }
+                    String symbol = extractLeadingSymbol(token);
+                    String resolvedCode = resolveSymbol(symbol, providers);
+                    cur = Monetary.getCurrency(resolvedCode, providers);
+                    context.consume(symbol);
                     context.setParsedCurrency(cur);
                     break;
                 case NAME:
@@ -284,6 +272,159 @@ final class CurrencyToken implements FormatToken {
     public void print(Appendable appendable, MonetaryAmount amount)
             throws IOException {
         appendable.append(getToken(amount));
+    }
+
+    /**
+     * Extracts the leading symbol segment from a token, stopping at the first digit,
+     * sign, or locale-specific decimal/grouping separator.
+     *
+     * @param token the input token
+     * @return the leading symbol portion
+     */
+    private String extractLeadingSymbol(String token) {
+        DecimalFormatSymbols symbols = DecimalFormatSymbols.getInstance(locale);
+        char decimalSeparator = symbols.getDecimalSeparator();
+        char groupingSeparator = symbols.getGroupingSeparator();
+
+        int symbolEnd = 0;
+        for (int i = 0; i < token.length(); i++) {
+            char ch = token.charAt(i);
+            if (Character.isDigit(ch) || ch == '+' || ch == '-' ||
+                ch == decimalSeparator || ch == groupingSeparator) {
+                break;
+            }
+            symbolEnd = i + 1;
+        }
+
+        return symbolEnd > 0 ? token.substring(0, symbolEnd) : token;
+    }
+
+    /**
+     * Resolves a currency symbol to an ISO currency code using locale-aware precedence.
+     *
+     * @param symbol the currency symbol to resolve
+     * @param providers the currency providers to use
+     * @return the ISO currency code
+     * @throws MonetaryParseException if the symbol cannot be resolved or is ambiguous
+     */
+    private String resolveSymbol(String symbol, String[] providers) {
+        // Check explicit currency in context first
+        CurrencyUnit explicitCurrency = this.context.get(CurrencyUnit.class);
+        if (explicitCurrency != null) {
+            String expectedSymbol = getCurrencySymbol(explicitCurrency);
+            if (symbolMatches(symbol, expectedSymbol)) {
+                return explicitCurrency.getCurrencyCode();
+            } else {
+                throw new MonetaryParseException(
+                    "Expected symbol '" + expectedSymbol + "' for " +
+                    explicitCurrency.getCurrencyCode() + " but found '" + symbol + "'.",
+                    symbol, -1);
+            }
+        }
+
+        // Check locale default currency
+        try {
+            Currency localeCurrency = Currency.getInstance(locale);
+            if (localeCurrency != null && symbolMatches(symbol, localeCurrency.getSymbol(locale))) {
+                return localeCurrency.getCurrencyCode();
+            }
+        } catch (Exception e) {
+            // Locale may not have a default currency
+        }
+
+        // Scan all available currencies
+        List<String> matches = findCurrenciesForSymbol(symbol);
+
+        if (matches.isEmpty()) {
+            throw new MonetaryParseException(
+                "Cannot resolve currency symbol '" + symbol + "' for locale " + locale + ".",
+                symbol, -1);
+        } else if (matches.size() == 1) {
+            return matches.get(0);
+        } else {
+            throw new MonetaryParseException(
+                "'" + symbol + "' is ambiguous in locale " + locale +
+                ". Possible currencies: " + String.join(", ", matches) + ".",
+                symbol, -1);
+        }
+    }
+
+    /**
+     * Finds all currency codes whose symbols match the given symbol in the current locale.
+     *
+     * @param symbol the symbol to match
+     * @return list of matching currency codes
+     */
+    private List<String> findCurrenciesForSymbol(String symbol) {
+        List<String> matches = new ArrayList<>();
+        for (Currency currency : Currency.getAvailableCurrencies()) {
+            try {
+                String currencySymbol = currency.getSymbol(locale);
+                if (symbolMatches(symbol, currencySymbol)) {
+                    matches.add(currency.getCurrencyCode());
+                }
+            } catch (Exception e) {
+                // Ignore currencies that fail to provide symbols
+            }
+        }
+        return matches;
+    }
+
+    /**
+     * Checks if two symbols match after normalization.
+     * Strips whitespace and trailing punctuation, and allows bidirectional substring matches.
+     * Handles both prefix ($US) and suffix (US$) forms.
+     *
+     * @param parsed the parsed symbol
+     * @param candidate the candidate symbol to compare
+     * @return true if the symbols match
+     */
+    private boolean symbolMatches(String parsed, String candidate) {
+        String normalizedParsed = normalizeSymbol(parsed);
+        String normalizedCandidate = normalizeSymbol(candidate);
+
+        // Exact match
+        if (normalizedParsed.equals(normalizedCandidate)) {
+            return true;
+        }
+
+        // Check if either ends with the other (for suffix forms like US$ matching $)
+        // or starts with the other (for prefix forms like $US matching $)
+        return normalizedParsed.endsWith(normalizedCandidate) ||
+               normalizedCandidate.endsWith(normalizedParsed) ||
+               normalizedParsed.startsWith(normalizedCandidate) ||
+               normalizedCandidate.startsWith(normalizedParsed);
+    }
+
+    /**
+     * Normalizes a currency symbol by removing whitespace and trailing punctuation.
+     * Currency symbols (like $, €, ¥, £) are preserved.
+     *
+     * @param symbol the symbol to normalize
+     * @return the normalized symbol
+     */
+    private String normalizeSymbol(String symbol) {
+        if (symbol == null || symbol.isEmpty()) {
+            return symbol;
+        }
+
+        // Remove all Unicode whitespace
+        String normalized = symbol.replaceAll("\\s+", "");
+
+        // Remove trailing punctuation, but NOT currency symbols
+        // Currency symbols are in the Currency Symbol category (Sc)
+        while (!normalized.isEmpty()) {
+            char lastChar = normalized.charAt(normalized.length() - 1);
+            // Stop if it's a letter, digit, or currency symbol
+            if (Character.isLetterOrDigit(lastChar) ||
+                Character.getType(lastChar) == Character.CURRENCY_SYMBOL) {
+                break;
+            }
+            // Remove trailing punctuation
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+
+        return normalized;
     }
 
     /*

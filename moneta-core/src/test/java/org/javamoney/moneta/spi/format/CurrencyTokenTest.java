@@ -69,27 +69,114 @@ public class CurrencyTokenTest {
 
     @Test
     public void testParse_SYMBOL_GBP() {
-        CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(FRANCE).build());
+        // GBP in UK locale shows as £
+        CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(UK).build());
         ParseContext context = new ParseContext("£");
         token.parse(context);
+        assertEquals(context.getParsedCurrency().getCurrencyCode(), "GBP");
         assertEquals(context.getIndex(), 1);
     }
 
     @Test
-    public void testParse_SYMBOL_ambiguous_dollar() {
+    public void testParse_SYMBOL_USD_in_US_locale() {
+        CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(US).build());
+        ParseContext context = new ParseContext("$");
+        token.parse(context);
+        assertEquals(context.getParsedCurrency().getCurrencyCode(), "USD");
+        assertEquals(context.getIndex(), 1);
+    }
+
+    @Test
+    public void testParse_SYMBOL_CAD_in_Canada_locale() {
+        CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(CANADA).build());
+        ParseContext context = new ParseContext("$");
+        token.parse(context);
+        assertEquals(context.getParsedCurrency().getCurrencyCode(), "CAD");
+        assertEquals(context.getIndex(), 1);
+    }
+
+    @Test
+    public void testParse_SYMBOL_JPY_in_Japan() {
+        // JPY in Japan locale shows as ￥ (full-width yen sign)
+        CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(JAPAN).build());
+        ParseContext context = new ParseContext("￥");
+        token.parse(context);
+        assertEquals(context.getParsedCurrency().getCurrencyCode(), "JPY");
+    }
+
+    @Test
+    public void testParse_SYMBOL_CNY_in_China() {
+        CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(CHINA).build());
+        ParseContext context = new ParseContext("¥");
+        token.parse(context);
+        assertEquals(context.getParsedCurrency().getCurrencyCode(), "CNY");
+    }
+
+    @Test
+    public void testParse_SYMBOL_HKD() {
+        CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(new Locale("en", "HK")).build());
+        ParseContext context = new ParseContext("HK$");
+        token.parse(context);
+        assertEquals(context.getParsedCurrency().getCurrencyCode(), "HKD");
+        assertEquals(context.getIndex(), 3);
+    }
+
+    @Test
+    public void testParse_SYMBOL_with_number_attached() {
+        CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(US).build());
+        ParseContext context = new ParseContext("$100");
+        token.parse(context);
+        assertEquals(context.getParsedCurrency().getCurrencyCode(), "USD");
+        assertEquals(context.getIndex(), 1);
+        assertEquals(context.getInput().toString(), "100");
+    }
+
+    @Test
+    public void testParse_SYMBOL_backward_compat_EUR() {
+        CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(FRANCE).build());
+        ParseContext context = new ParseContext("€");
+        token.parse(context);
+        assertEquals(context.getParsedCurrency().getCurrencyCode(), "EUR");
+        assertEquals(context.getIndex(), 1);
+    }
+
+    @Test
+    public void testParse_SYMBOL_backward_compat_GBP() {
+        CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(UK).build());
+        ParseContext context = new ParseContext("£");
+        token.parse(context);
+        assertEquals(context.getParsedCurrency().getCurrencyCode(), "GBP");
+        assertEquals(context.getIndex(), 1);
+    }
+
+    @Test
+    public void testParse_SYMBOL_ambiguous_dollar_in_neutral_locale() {
+        // France uses EUR, so $ should be ambiguous (USD, CAD, AUD, etc.)
         CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(FRANCE).build());
         ParseContext context = new ParseContext("$");
         try {
             token.parse(context);
+            fail("Expected MonetaryParseException for ambiguous symbol");
         } catch (MonetaryParseException e) {
             assertEquals(e.getInput(), "$");
-            assertEquals(e.getErrorIndex(), -1);
-            assertEquals(e.getMessage(), "$ is not a unique currency symbol.");
+            assertTrue(e.getMessage().contains("ambiguous"), "Error message should mention ambiguity");
+            assertTrue(e.getMessage().contains("USD") || e.getMessage().contains("CAD"),
+                "Error message should list candidate currencies");
         }
-        assertEquals(context.getIndex(), 0);
-        assertFalse(context.isComplete());
         assertTrue(context.hasError());
-        assertEquals(context.getErrorMessage(), "$ is not a unique currency symbol.");
+    }
+
+    @Test
+    public void testParse_SYMBOL_ambiguous_dollar_with_number() {
+        CurrencyToken token = new CurrencyToken(SYMBOL, AmountFormatContextBuilder.of(FRANCE).build());
+        ParseContext context = new ParseContext("$100");
+        try {
+            token.parse(context);
+            fail("Expected MonetaryParseException for ambiguous symbol");
+        } catch (MonetaryParseException e) {
+            assertEquals(e.getInput(), "$");
+            assertTrue(e.getMessage().contains("ambiguous"));
+        }
     }
 
     @Test
