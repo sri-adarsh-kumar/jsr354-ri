@@ -26,7 +26,6 @@ import java.io.IOException;
 import java.text.DecimalFormatSymbols;
 import java.util.*;
 import java.util.logging.Logger;
-import java.util.stream.Collectors;
 
 import static java.util.Objects.requireNonNull;
 import static java.util.logging.Level.FINEST;
@@ -145,7 +144,7 @@ final class CurrencyToken implements FormatToken {
     private Currency getCurrency(String currencyCode) {
         try {
             return Currency.getInstance(currencyCode);
-        } catch (Exception e) {
+        } catch (IllegalArgumentException e) {
             return null;
         }
     }
@@ -328,7 +327,7 @@ final class CurrencyToken implements FormatToken {
             if (localeCurrency != null && symbolMatches(symbol, localeCurrency.getSymbol(locale))) {
                 return localeCurrency.getCurrencyCode();
             }
-        } catch (Exception e) {
+        } catch (IllegalArgumentException e) {
             // Locale may not have a default currency
         }
 
@@ -358,13 +357,9 @@ final class CurrencyToken implements FormatToken {
     private List<String> findCurrenciesForSymbol(String symbol) {
         List<String> matches = new ArrayList<>();
         for (Currency currency : Currency.getAvailableCurrencies()) {
-            try {
-                String currencySymbol = currency.getSymbol(locale);
-                if (symbolMatches(symbol, currencySymbol)) {
-                    matches.add(currency.getCurrencyCode());
-                }
-            } catch (Exception e) {
-                // Ignore currencies that fail to provide symbols
+            String currencySymbol = currency.getSymbol(locale);
+            if (symbolMatches(symbol, currencySymbol)) {
+                matches.add(currency.getCurrencyCode());
             }
         }
         return matches;
@@ -382,6 +377,11 @@ final class CurrencyToken implements FormatToken {
     private boolean symbolMatches(String parsed, String candidate) {
         String normalizedParsed = normalizeSymbol(parsed);
         String normalizedCandidate = normalizeSymbol(candidate);
+
+        // Reject empty/missing symbols - a blank symbol cannot match anything
+        if (normalizedParsed.isEmpty() || normalizedCandidate.isEmpty()) {
+            return false;
+        }
 
         // Exact match
         if (normalizedParsed.equals(normalizedCandidate)) {
