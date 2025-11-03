@@ -213,7 +213,7 @@ final class CurrencyToken implements FormatToken {
                     break;
                 case SYMBOL:
                     String symbol = extractLeadingSymbol(token);
-                    String resolvedCode = resolveSymbol(symbol, providers);
+                    String resolvedCode = resolveSymbol(symbol);
                     cur = Monetary.getCurrency(resolvedCode, providers);
                     context.consume(symbol);
                     context.setParsedCurrency(cur);
@@ -276,6 +276,15 @@ final class CurrencyToken implements FormatToken {
     /**
      * Extracts the leading symbol segment from a token, stopping at the first digit,
      * sign, or locale-specific decimal/grouping separator.
+     * <p>
+     * Examples (US locale with '.' as decimal separator):
+     * <ul>
+     * <li>{@code "$100"} → {@code "$"}</li>
+     * <li>{@code "US$1,234.56"} → {@code "US$"}</li>
+     * <li>{@code "HK$-50"} → {@code "HK$"}</li>
+     * <li>{@code "€ 100"} → {@code "€"} (space before digit)</li>
+     * <li>{@code "₹1234"} → {@code "₹"}</li>
+     * </ul>
      *
      * @param token the input token
      * @return the leading symbol portion
@@ -300,13 +309,30 @@ final class CurrencyToken implements FormatToken {
 
     /**
      * Resolves a currency symbol to an ISO currency code using locale-aware precedence.
+     * <p>
+     * Resolution follows this order:
+     * <ol>
+     * <li>If explicit currency is set in context, verify symbol matches (e.g., USD set + "$" → USD)</li>
+     * <li>Check if symbol matches locale's default currency (e.g., "$" in US locale → USD)</li>
+     * <li>Scan all available currencies for unique match (e.g., "€" → EUR)</li>
+     * <li>If multiple matches found, throw ambiguity error</li>
+     * </ol>
+     * <p>
+     * Example scenarios:
+     * <ul>
+     * <li><b>Locale default wins:</b> "$" in {@code Locale.US} → "USD", in {@code Locale.CANADA} → "CAD"</li>
+     * <li><b>Explicit currency:</b> "$" with USD set in French locale → "USD"</li>
+     * <li><b>Unique symbol:</b> "€" in any locale → "EUR"</li>
+     * <li><b>Ambiguous:</b> "$" in {@code Locale.FRANCE} → exception listing USD, CAD, AUD, etc.</li>
+     * <li><b>Mismatch:</b> "€" with USD set → exception "Expected symbol '$' for USD but found '€'"</li>
+     * <li><b>Unknown:</b> "¤" → exception "Cannot resolve currency symbol"</li>
+     * </ul>
      *
      * @param symbol the currency symbol to resolve
-     * @param providers the currency providers to use
      * @return the ISO currency code
      * @throws MonetaryParseException if the symbol cannot be resolved or is ambiguous
      */
-    private String resolveSymbol(String symbol, String[] providers) {
+    private String resolveSymbol(String symbol) {
         // Check explicit currency in context first
         CurrencyUnit explicitCurrency = this.context.get(CurrencyUnit.class);
         if (explicitCurrency != null) {
@@ -350,9 +376,19 @@ final class CurrencyToken implements FormatToken {
 
     /**
      * Finds all currency codes whose symbols match the given symbol in the current locale.
+     * <p>
+     * Examples:
+     * <ul>
+     * <li>{@code "$"} in US locale → [USD] (unique match)</li>
+     * <li>{@code "$"} in French locale → [USD, CAD, AUD, ...] (multiple matches)</li>
+     * <li>{@code "€"} in any locale → [EUR] (unique match)</li>
+     * <li>{@code "¥"} in Japanese locale → [JPY] (locale-specific symbol)</li>
+     * <li>{@code "kr"} in Swedish locale → [SEK] (locale-specific)</li>
+     * <li>{@code "¤"} → [] (no matches - generic placeholder)</li>
+     * </ul>
      *
      * @param symbol the symbol to match
-     * @return list of matching currency codes
+     * @return list of matching currency codes (may be empty, one, or multiple)
      */
     private List<String> findCurrenciesForSymbol(String symbol) {
         List<String> matches = new ArrayList<>();
@@ -368,10 +404,30 @@ final class CurrencyToken implements FormatToken {
     /**
      * Checks if two symbols match after normalization.
      * Strips whitespace and trailing punctuation, and allows bidirectional substring matches.
-     * Handles both prefix ($US) and suffix (US$) forms.
+     * Handles both prefix ({@code $US}) and suffix ({@code US$}) forms produced by different locales.
+     * <p>
+     * Matching rules after normalization:
+     * <ul>
+     * <li>Exact match: {@code "$"} matches {@code "$"}</li>
+     * <li>Suffix match: {@code "$"} matches {@code "US$"} (parsed ends with candidate)</li>
+     * <li>Prefix match: {@code "$"} matches {@code "$US"} (parsed starts with candidate)</li>
+     * <li>Reverse suffix: {@code "US$"} matches {@code "$"} (candidate ends with parsed)</li>
+     * <li>Reverse prefix: {@code "$US"} matches {@code "$"} (candidate starts with parsed)</li>
+     * </ul>
+     * <p>
+     * Examples:
+     * <ul>
+     * <li>{@code symbolMatches("$", "$")} → true (exact)</li>
+     * <li>{@code symbolMatches("$", "US$")} → true (parsed is suffix of candidate)</li>
+     * <li>{@code symbolMatches("US$", "$")} → true (candidate is suffix of parsed)</li>
+     * <li>{@code symbolMatches("$", "$US")} → true (parsed is prefix of candidate)</li>
+     * <li>{@code symbolMatches("€", "$")} → false (no match)</li>
+     * <li>{@code symbolMatches("", "$")} → false (empty symbols rejected)</li>
+     * <li>{@code symbolMatches("лв.", "лв")} → true (after normalization removes trailing '.')</li>
+     * </ul>
      *
-     * @param parsed the parsed symbol
-     * @param candidate the candidate symbol to compare
+     * @param parsed the parsed symbol from input
+     * @param candidate the candidate symbol from Currency/context
      * @return true if the symbols match
      */
     private boolean symbolMatches(String parsed, String candidate) {
@@ -398,10 +454,28 @@ final class CurrencyToken implements FormatToken {
 
     /**
      * Normalizes a currency symbol by removing whitespace and trailing punctuation.
-     * Currency symbols (like $, €, ¥, £) are preserved.
+     * Currency symbols (like {@code $}, {@code €}, {@code ¥}, {@code £}) are preserved.
+     * <p>
+     * Normalization steps:
+     * <ol>
+     * <li>Remove all Unicode whitespace characters (spaces, tabs, non-breaking spaces, etc.)</li>
+     * <li>Remove trailing punctuation (periods, commas, etc.) except currency symbols</li>
+     * <li>Preserve letters, digits, and currency symbols in Unicode category Sc</li>
+     * </ol>
+     * <p>
+     * Examples:
+     * <ul>
+     * <li>{@code "US$"} → {@code "US$"} (no change)</li>
+     * <li>{@code "$ "} → {@code "$"} (whitespace removed)</li>
+     * <li>{@code "US $"} → {@code "US$"} (internal whitespace removed)</li>
+     * <li>{@code "лв."} → {@code "лв"} (trailing period removed)</li>
+     * <li>{@code "€\u00A0"} → {@code "€"} (non-breaking space removed)</li>
+     * <li>{@code "kr"} → {@code "kr"} (no change)</li>
+     * <li>{@code ""} → {@code ""} (empty remains empty)</li>
+     * </ul>
      *
      * @param symbol the symbol to normalize
-     * @return the normalized symbol
+     * @return the normalized symbol with whitespace and trailing punctuation removed
      */
     private String normalizeSymbol(String symbol) {
         if (symbol == null || symbol.isEmpty()) {
