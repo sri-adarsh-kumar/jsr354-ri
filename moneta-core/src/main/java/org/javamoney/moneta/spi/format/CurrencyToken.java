@@ -144,7 +144,7 @@ final class CurrencyToken implements FormatToken {
     private Currency getCurrency(String currencyCode) {
         try {
             return Currency.getInstance(currencyCode);
-        } catch (IllegalArgumentException e) {
+        } catch (Exception e) {
             return null;
         }
     }
